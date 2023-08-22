@@ -1,0 +1,10 @@
+# User-specific stuff:
+.idea/
+.vscode/
+__pycache__/
+.DS_Store
+src/.dags/
+src/logs
+variables.json
+db_dwh/
+volumes/
