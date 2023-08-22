@@ -1,0 +1,137 @@
+version: "3.4"
+
+x-ariflow_common:
+  &airflow-common
+  build: .
+  environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      AIRFLOW__WEBSERVER__RELOAD_ON_PLUGIN_CHANGE: 'true'
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CORE__DAGS_FOLDER: /app/src/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /app/src/plugins
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /app/src/logs
+      AIRFLOW__CELERY__BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+      AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'false'
+      AIRFLOW__CORE__LAZY_LOAD_PLUGINS: 'true'
+      AIRFLOW__CORE__EXECUTE_TASKS_NEW_PYTHON_INTERPRETER: 'true'
+      AIRFLOW__WEBSERVER__WORKERS: 5 # 2 * NUM_CPU_CORES + 1
+      AIRFLOW__WEBSERVER__WORKER_REFRESH_INTERVAL: 18000 # Restart workers every 30min instead of 30seconds
+      AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: 30000
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+  volumes:
+    - ./src:/app/src
+  depends_on:
+    &airflow-common-depends-on
+    rabbitmq:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    test_postgresql:
+      condition: service_healthy
+
+
+
+services:
+  postgres:
+    image: postgres:13
+    env_file:
+      - .env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      retries: 5
+    restart: always
+
+  test_postgresql:
+    image: postgres:14
+    env_file:
+      - .env.test_postgresql
+    ports:
+      - "5433:5433"
+    volumes:
+      - ${VOLUME}/test_postgresql/postgresql:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${TEST_POSTGRESQL}"]
+      interval: 30s
+      retries: 5
+    restart: always
+
+  test_clickhouse:
+    image: yandex/clickhouse-server:21.3.20.1
+    volumes:
+      - ${VOLUME}/test_clickhouse:/var/lib/clickhouse
+      - ./test_clickhouse.xml:/etc/clickhouse-server/users.xml
+
+  rabbitmq:
+    image: rabbitmq:latest
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      retries: 3
+    restart: always
+
+  initdb:
+    <<: *airflow-common
+    command: bash -c "airflow db init  && airflow db upgrade && airflow db check && airflow users  create --role Admin --username ${AIRFLOW_USER} --email admin --firstname admin --lastname admin --password ${AIRFLOW_PASSWORD}"
+    depends_on:
+      <<: *airflow-common-depends-on
+
+  scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    volumes:
+      - ${VOLUME}/airflow_scheduler/:/app
+    restart: always
+    depends_on:
+      - initdb
+
+
+  worker:
+    <<: *airflow-common
+    command: airflow celery worker
+    volumes:
+      - ${VOLUME}/airflow_worker/:/app
+    restart: always
+    depends_on:
+      - initdb
+
+  webserver:
+    <<: *airflow-common
+    command: bash -c "airflow webserver --port 9080"
+    volumes:
+      - ${VOLUME}/airflow_webserver/:/app
+    ports:
+      - "9080:9080"
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:9080/health"]
+      interval: 5s
+      retries: 5
+    depends_on:
+      - worker
+
+
+
+  flower:
+    <<: *airflow-common
+    command: airflow celery flower
+    ports:
+      - "5555:5555"
+    restart: always
+    depends_on:
+      - worker
+
+volumes:
+  pgdata:
+  test_postgresql:
