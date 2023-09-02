@@ -5,6 +5,7 @@ x-ariflow_common:
   build: .
   environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+#      AIRFLOW__WEBSERVER__WORKER_CLASS: gevent
       AIRFLOW__WEBSERVER__RELOAD_ON_PLUGIN_CHANGE: 'true'
       AIRFLOW__CORE__EXECUTOR: CeleryExecutor
       AIRFLOW__CORE__DAGS_FOLDER: /app/src/dags
@@ -12,7 +13,7 @@ x-ariflow_common:
       AIRFLOW__LOGGING__BASE_LOG_FOLDER: /app/src/logs
       AIRFLOW__CELERY__BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: 'false'
       AIRFLOW__CORE__LAZY_LOAD_PLUGINS: 'true'
       AIRFLOW__CORE__EXECUTE_TASKS_NEW_PYTHON_INTERPRETER: 'true'
@@ -20,10 +21,6 @@ x-ariflow_common:
       AIRFLOW__WEBSERVER__WORKER_REFRESH_INTERVAL: 18000 # Restart workers every 30min instead of 30seconds
       AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: 30000
       AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-      _AIRFLOW_DB_UPGRADE: 'true'
-      _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
-      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
   volumes:
     - ./src:/app/src
   depends_on:
@@ -31,8 +28,6 @@ x-ariflow_common:
     rabbitmq:
       condition: service_healthy
     postgres:
-      condition: service_healthy
-    test_postgresql:
       condition: service_healthy
 
 
@@ -42,6 +37,8 @@ services:
     image: postgres:13
     env_file:
       - .env
+    ports:
+      - 5432:5432
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -49,26 +46,6 @@ services:
       interval: 10s
       retries: 5
     restart: always
-
-  test_postgresql:
-    image: postgres:14
-    env_file:
-      - .env.test_postgresql
-    ports:
-      - "5433:5433"
-    volumes:
-      - ${VOLUME}/test_postgresql/postgresql:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${TEST_POSTGRESQL}"]
-      interval: 30s
-      retries: 5
-    restart: always
-
-  test_clickhouse:
-    image: yandex/clickhouse-server:21.3.20.1
-    volumes:
-      - ${VOLUME}/test_clickhouse:/var/lib/clickhouse
-      - ./test_clickhouse.xml:/etc/clickhouse-server/users.xml
 
   rabbitmq:
     image: rabbitmq:latest
@@ -83,55 +60,67 @@ services:
 
   initdb:
     <<: *airflow-common
-    command: bash -c "airflow db init  && airflow db upgrade && airflow db check && airflow users  create --role Admin --username ${AIRFLOW_USER} --email admin --firstname admin --lastname admin --password ${AIRFLOW_PASSWORD}"
+    command: bash -c "airflow db init  && airflow db upgrade && airflow db check-migrations && airflow users  create --role Admin --username ${AIRFLOW_USER} --email admin --firstname admin --lastname admin --password ${AIRFLOW_PASSWORD}"
     depends_on:
       <<: *airflow-common-depends-on
 
   scheduler:
     <<: *airflow-common
     command: airflow scheduler
-    volumes:
-      - ${VOLUME}/airflow_scheduler/:/app
     restart: always
     depends_on:
-      - initdb
+      <<: *airflow-common-depends-on
+      initdb:
+        condition: service_completed_successfully
 
 
   worker:
     <<: *airflow-common
     command: airflow celery worker
-    volumes:
-      - ${VOLUME}/airflow_worker/:/app
     restart: always
     depends_on:
-      - initdb
+      <<: *airflow-common-depends-on
+      initdb:
+        condition: service_completed_successfully
 
-  webserver:
+  airflow_webserver:
     <<: *airflow-common
-    command: bash -c "airflow webserver --port 9080"
-    volumes:
-      - ${VOLUME}/airflow_webserver/:/app
+    command: bash -c "airflow webserver --port 8080"
     ports:
-      - "9080:9080"
+      - 8080:8080
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:9080/health"]
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 5s
       retries: 5
     depends_on:
-      - worker
+      <<: *airflow-common-depends-on
+      initdb:
+        condition: service_completed_successfully
 
 
 
-  flower:
+  airflow_flower:
     <<: *airflow-common
     command: airflow celery flower
     ports:
-      - "5555:5555"
+      - 5555:5555
     restart: always
     depends_on:
-      - worker
+      <<: *airflow-common-depends-on
+      initdb:
+        condition: service_completed_successfully
+
+  sql-server-db:
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_PASS}
+      ACCEPT_EULA: "Y"
+    container_name: sql-server-db
+    image: mcr.microsoft.com/mssql/server:2022-preview-ubuntu-22.04
+    ports:
+      - "1433:1433"
+    volumes:
+      - ./mssql_backups:/var/backups
 
 volumes:
   pgdata:
-  test_postgresql:

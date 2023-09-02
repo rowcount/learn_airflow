@@ -3,7 +3,7 @@ from airflow.operators.dummy import DummyOperator
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
 
-CRON_SCHEDULE = '@once'
+CRON_SCHEDULE = '*/5 * * * *'
 
 dag = DAG(
     'health_check',
